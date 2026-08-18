@@ -20,6 +20,14 @@ const navItems = [
 // see apple-design skill, section 4.
 const MOVE_SPRING = { type: 'spring', damping: 30, stiffness: 340 };
 
+// Fixed diameter for the sliding indicator behind each icon-only tab.
+// Deliberately NOT derived from each slot's measured width anymore —
+// that's what was causing the pill to stretch/drift out of alignment
+// under Skills/Work/Contact. A constant size means the indicator always
+// lands as a clean circle, no matter which tab is active (apple-design
+// skill §16, "craft": misaligned chrome reads as carelessness).
+const PILL_SIZE = 46;
+
 export default function Navbar({ config }) {
   const [active, setActive] = useState('home');
   const resumeUrl = config?.resumeUrl || '#';
@@ -35,7 +43,7 @@ export default function Navbar({ config }) {
   // for position, NOT `left`, which forces layout every frame and is
   // exactly what was causing the stutter (apple-design skill §11).
   const pillX = useMotionValue(0);
-  const pillWidth = useMotionValue(64);
+  const pillWidth = useMotionValue(PILL_SIZE);
 
   const getSlotCenter = useCallback((key) => {
     const wrap = tabWrapRef.current;
@@ -43,9 +51,8 @@ export default function Navbar({ config }) {
     if (!wrap || !el) return null;
     const wrapRect = wrap.getBoundingClientRect();
     const r = el.getBoundingClientRect();
-    pillWidth.set(r.width - 10); // slot width minus a hair of margin
     return r.left - wrapRect.left + r.width / 2;
-  }, [pillWidth]);
+  }, []);
 
   const moveTo = useCallback((key, animated = true) => {
     const center = getSlotCenter(key);
@@ -159,7 +166,8 @@ export default function Navbar({ config }) {
         </motion.nav>
       </div>
 
-      {/* Mobile floating "Liquid Glass" pill nav — Instagram-style translate-only slide */}
+      {/* Mobile floating "Liquid Glass" pill nav — icon-only, Instagram-style
+          use of space, dark sliding indicator instead of a light smudge. */}
       <motion.nav
         className="ios-tabbar"
         animate={{
@@ -189,13 +197,14 @@ export default function Navbar({ config }) {
                 <Link
                   to={to} smooth duration={500} spy offset={-40}
                   className={`ios-tab-item${isActive ? ' tab-active' : ''}`}
+                  aria-label={label}
+                  title={label}
                   onClick={() => setActive(to)}
                   onSetActive={() => setActive(to)}
                 >
                   <span className="ios-tab-icon-wrap">
                     <Icon className="ios-tab-icon" />
                   </span>
-                  <span className="ios-tab-label">{label}</span>
                 </Link>
               </div>
             );
