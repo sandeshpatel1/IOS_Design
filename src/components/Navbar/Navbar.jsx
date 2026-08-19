@@ -17,16 +17,9 @@ const navItems = [
 ];
 
 const MOVE_SPRING = { type: 'spring', damping: 30, stiffness: 340 };
-
-// How long react-scroll's own smooth-scroll animation takes. We mute its
-// `spy` callback for this long after WE trigger a scroll (click or drag
-// release), because spy fires for every section the viewport passes
-// THROUGH en route to the target, not just the destination. Without this,
-// scrolling to "Contact" passes Skills/Work, spy fires onSetActive for
-// each of them mid-flight, and the pill jumps to whichever fired last —
-// this is the actual cause of the "wrong tab" bug.
 const SCROLL_DURATION = 500;
-const SPY_SUPPRESS_MS = SCROLL_DURATION + 150;
+const SPY_SUPPRESS_MS = SCROLL_DURATION + 200;
+const PILL_INSET = 4; // px gap between pill edge and slot edge, each side
 
 export default function Navbar({ config }) {
   const [active, setActive] = useState('home');
@@ -35,7 +28,7 @@ export default function Navbar({ config }) {
   const tucked = scrolled && direction === 'down';
 
   const tabWrapRef = useRef(null);
-  const tabItemRefs = useRef({});
+  const [wrapWidth, setWrapWidth] = useState(0);
   const dragRef = useRef({ dragging: false, startX: 0, moved: false });
 
   const suppressSpyRef = useRef(false);
@@ -50,60 +43,68 @@ export default function Navbar({ config }) {
   const pillX = useMotionValue(0);
   const pillWidth = useMotionValue(64);
 
-  // Pure measurement, no side effects — the nearest-tab search during a
-  // drag can call this for every candidate without corrupting pillWidth.
-  const measureSlot = useCallback((key) => {
-    const wrap = tabWrapRef.current;
-    const el = tabItemRefs.current[key];
-    if (!wrap || !el) return null;
-    const wrapRect = wrap.getBoundingClientRect();
-    const r = el.getBoundingClientRect();
-    return {
-      center: r.left - wrapRect.left + r.width / 2,
-      width: r.width - 4, // near-edge-to-edge fill, Instagram-style
-    };
+  // ── Geometry is pure arithmetic now, not live DOM measurement of each
+  // tab. All 5 slots are equal width (flex:1 in CSS), so once we know the
+  // bar's own width we know every slot's position exactly — no more
+  // getBoundingClientRect() calls on the icons themselves, which is what
+  // was racing with the navbar's own scale/opacity spring (the `tucked`
+  // animation) and occasionally returning a mid-transition rect: a wrong
+  // position, or a momentarily huge/zero width that looked like "the
+  // layout breaking". ──
+  const slotWidth = wrapWidth / navItems.length;
+  const pillW = Math.max(slotWidth - PILL_INSET * 2, 0);
+
+  const indexOf = useCallback((key) => {
+    const i = navItems.findIndex(t => t.to === key);
+    return i === -1 ? 0 : i;
   }, []);
 
-  const moveTo = useCallback((key, animated = true) => {
-    const slot = measureSlot(key);
-    if (!slot) return;
-    pillWidth.set(slot.width);
-    const target = slot.center - slot.width / 2;
-    if (animated) animate(pillX, target, MOVE_SPRING);
-    else pillX.set(target);
-  }, [measureSlot, pillX, pillWidth]);
+  const moveToIndex = useCallback((index, animated = true) => {
+    if (!slotWidth) return;
+    pillWidth.set(pillW);
+    const x = index * slotWidth + PILL_INSET;
+    if (animated) animate(pillX, x, MOVE_SPRING);
+    else pillX.set(x);
+  }, [slotWidth, pillW, pillX, pillWidth]);
 
+  // Measure the bar's own width — once on mount, and whenever it resizes
+  // (viewport resize, orientation change, safe-area changes).
   useLayoutEffect(() => {
-    moveTo(active, false);
-    const onResize = () => moveTo(active, false);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    const wrap = tabWrapRef.current;
+    if (!wrap) return;
+    const measure = () => setWrapWidth(wrap.getBoundingClientRect().width);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(wrap);
+    return () => ro.disconnect();
   }, []);
 
+  // Re-snap to the current tab whenever the measured width changes,
+  // as long as we're not mid-drag.
   useEffect(() => {
-    const id = requestAnimationFrame(() => moveTo(active, false));
-    return () => cancelAnimationFrame(id);
+    if (!dragRef.current.dragging) moveToIndex(indexOf(active), false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [wrapWidth]);
 
+  // Tap / scroll-spy driven changes glide over with the spring.
   const prevActiveRef = useRef(active);
   useEffect(() => {
     if (prevActiveRef.current !== active && !dragRef.current.dragging) {
-      moveTo(active, true);
+      moveToIndex(indexOf(active), true);
     }
     prevActiveRef.current = active;
-  }, [active, moveTo]);
+  }, [active, indexOf, moveToIndex]);
 
-  // Scroll-spy updates from organic scrolling — ignored while WE are the
-  // ones driving a scroll (click or drag release).
+  // Scroll-spy from organic scrolling — ignored while WE are driving a
+  // scroll ourselves (click or drag release). A programmatic scroll to
+  // "Contact" passes through Skills/Work on the way there, and spy fires
+  // onSetActive for each section it passes, not just the destination —
+  // that's what was yanking the pill to the wrong tab on release.
   const handleSpyActive = useCallback((key) => {
     if (suppressSpyRef.current) return;
     setActive(key);
   }, []);
 
-  // Direct tab click — the Link performs its own smooth scroll; we just
-  // mute spy for that scroll's duration so it can't hijack the pill.
   const handleTabClick = useCallback((key) => {
     suppressSpyFor();
     setActive(key);
@@ -115,25 +116,26 @@ export default function Navbar({ config }) {
   };
 
   const handlePointerMove = (e) => {
-    if (!dragRef.current.dragging) return;
+    if (!dragRef.current.dragging || !slotWidth) return;
     if (Math.abs(e.clientX - dragRef.current.startX) > 6) dragRef.current.moved = true;
     if (!dragRef.current.moved) return;
 
     const wrap = tabWrapRef.current;
     if (!wrap) return;
     const wrapRect = wrap.getBoundingClientRect();
-    const halfPill = pillWidth.get() / 2;
-    const clamped = Math.max(4, Math.min(e.clientX - wrapRect.left - halfPill, wrapRect.width - pillWidth.get() - 4));
-    pillX.set(clamped);
+    const fingerX = e.clientX - wrapRect.left;
 
-    const fingerCenter = clamped + halfPill;
-    let nearestKey = active, nearestDist = Infinity;
-    navItems.forEach(t => {
-      const slot = measureSlot(t.to); // read-only — doesn't touch pillWidth
-      if (!slot) return;
-      const d = Math.abs(slot.center - fingerCenter);
-      if (d < nearestDist) { nearestDist = d; nearestKey = t.to; }
-    });
+    const clampedLeft = Math.max(
+      PILL_INSET,
+      Math.min(fingerX - pillW / 2, wrapWidth - pillW - PILL_INSET)
+    );
+    pillWidth.set(pillW); // always the constant slot width — never derived
+                          // from a per-tab measurement, so it can't glitch
+    pillX.set(clampedLeft);
+
+    const centerX = clampedLeft + pillW / 2;
+    const nearestIndex = Math.max(0, Math.min(Math.floor(centerX / slotWidth), navItems.length - 1));
+    const nearestKey = navItems[nearestIndex].to;
     if (nearestKey !== active) setActive(nearestKey);
   };
 
@@ -142,9 +144,8 @@ export default function Navbar({ config }) {
     const wasDrag = dragRef.current.moved;
     dragRef.current.dragging = false;
     if (wasDrag) {
-      suppressSpyFor(); // the programmatic scroll below passes through
-                         // intermediate sections — don't let spy hijack it
-      moveTo(active, true);
+      suppressSpyFor();
+      moveToIndex(indexOf(active), true);
       scroller.scrollTo(active, { smooth: true, duration: SCROLL_DURATION, offset: -40 });
     }
   };
@@ -204,15 +205,17 @@ export default function Navbar({ config }) {
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
         >
-          <motion.span
-            className="tab-pill"
-            style={{ x: pillX, width: pillWidth }}
-          />
+          {wrapWidth > 0 && (
+            <motion.span
+              className="tab-pill"
+              style={{ x: pillX, width: pillWidth }}
+            />
+          )}
 
           {navItems.map(({ label, to, Icon }) => {
             const isActive = active === to;
             return (
-              <div key={to} className="ios-tab-slot" ref={el => { tabItemRefs.current[to] = el; }}>
+              <div key={to} className="ios-tab-slot">
                 <Link
                   to={to} smooth duration={SCROLL_DURATION} spy offset={-40}
                   className={`ios-tab-item${isActive ? ' tab-active' : ''}`}
