@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import { Link, scroller } from 'react-scroll';
-import { motion, useMotionValue, animate } from 'framer-motion';
+import { motion, useMotionValue, useTransform, animate } from 'framer-motion';
 import {
   HiOutlineHome, HiOutlineUser, HiOutlineSparkles,
   HiOutlineSquares2X2, HiOutlineChatBubbleLeftRight,
@@ -16,15 +16,20 @@ const navItems = [
   { label: 'Contact',  to: 'contact',  Icon: HiOutlineChatBubbleLeftRight },
 ];
 
-// Genuinely critically-damped now: for stiffness 320, critical damping is
-// 2*sqrt(320) ≈ 35.8. Sitting at/above that means the pill arrives at its
-// target and stops — it can no longer overshoot and spring back, which is
-// what read as "jumps past the tab, then returns" on a direct click.
 const MOVE_SPRING = { type: 'spring', stiffness: 320, damping: 36, mass: 1 };
-
 const SCROLL_DURATION = 500;
 const SPY_SUPPRESS_MS = SCROLL_DURATION + 200;
-const PILL_INSET = 4; // px gap between pill edge and slot edge, each side
+const PILL_INSET = 2;
+const MOBILE_BREAKPOINT = '(max-width: 900px)';
+
+// ── Stretch tuning ──
+const DEAD_ZONE = 10;      // px the finger must cross past a slot boundary
+                            // before the anchor re-targets to the next tab —
+                            // without this, sitting near a boundary makes
+                            // the anchor flicker back and forth every frame.
+const MAX_STRETCH_RATIO = 1; // stretch caps at 1x a slot-width beyond the
+                              // anchor's own edge, so the pill can't smear
+                              // across the whole bar on a fast/long drag.
 
 export default function Navbar({ config }) {
   const [active, setActive] = useState('home');
@@ -32,18 +37,21 @@ export default function Navbar({ config }) {
   const { direction, scrolled } = useScrollDirection();
   const tucked = scrolled && direction === 'down';
 
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia(MOBILE_BREAKPOINT).matches
+  );
+  useEffect(() => {
+    const mq = window.matchMedia(MOBILE_BREAKPOINT);
+    const onChange = () => setIsMobile(mq.matches);
+    onChange();
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
   const tabWrapRef = useRef(null);
   const dragRef = useRef({ dragging: false, startX: 0, moved: false });
+  const anchorIndexRef = useRef(0); // which tab's edge is currently "pinned"
 
-  // ── Geometry, in the SAME coordinate system the pill's `left`/`x` uses.
-  // A position:absolute child's origin sits just inside the ancestor's
-  // border (the padding-box edge) — it does NOT skip past the ancestor's
-  // own padding. `.ios-tabbar-inner` has padding + a border, so without
-  // accounting for those explicitly, "index * slotWidth" silently drifted
-  // further from the real slot position at every step — small at tab 0,
-  // visibly lopsided by tab 4. contentWidth/originOffset below correct
-  // for that once, from the actual computed styles, instead of assuming
-  // the wrap's border-box width IS its usable width. ──
   const [layout, setLayout] = useState({ contentWidth: 0, originOffset: 0 });
 
   useLayoutEffect(() => {
@@ -53,12 +61,9 @@ export default function Navbar({ config }) {
       const style = getComputedStyle(wrap);
       const paddingLeft = parseFloat(style.paddingLeft) || 0;
       const paddingRight = parseFloat(style.paddingRight) || 0;
-      const borderLeft = parseFloat(style.borderLeftWidth) || 0;
-      const borderRight = parseFloat(style.borderRightWidth) || 0;
-      const rect = wrap.getBoundingClientRect();
       setLayout({
-        contentWidth: rect.width - paddingLeft - paddingRight - borderLeft - borderRight,
-        originOffset: paddingLeft, // how far past the pill's own x:0 the real content starts
+        contentWidth: wrap.clientWidth - paddingLeft - paddingRight,
+        originOffset: paddingLeft,
       });
     };
     measure();
@@ -69,31 +74,45 @@ export default function Navbar({ config }) {
 
   const { contentWidth, originOffset } = layout;
   const slotWidth = contentWidth / navItems.length;
-  const pillW = Math.max(slotWidth - PILL_INSET * 2, 0);
-
-  const pillX = useMotionValue(0);
-  const pillWidth = useMotionValue(64);
 
   const indexOf = useCallback((key) => {
     const i = navItems.findIndex(t => t.to === key);
     return i === -1 ? 0 : i;
   }, []);
 
+  // Two independent edges instead of one x + fixed width — a stretch needs
+  // two points that can move apart from each other. Width is derived, not
+  // stored, so it's always mathematically consistent with the edges.
+  const leftEdge = useMotionValue(0);
+  const rightEdge = useMotionValue(64);
+  const pillWidth = useTransform([leftEdge, rightEdge], ([l, r]) => Math.max(r - l, 0));
+
+  const slotBounds = useCallback((index) => ({
+    left: originOffset + index * slotWidth + PILL_INSET,
+    right: originOffset + (index + 1) * slotWidth - PILL_INSET,
+  }), [originOffset, slotWidth]);
+
   const moveToIndex = useCallback((index, animated = true) => {
     if (!slotWidth) return;
-    pillWidth.set(pillW);
-    const x = originOffset + index * slotWidth + PILL_INSET;
-    if (animated) animate(pillX, x, MOVE_SPRING);
-    else pillX.set(x);
-  }, [slotWidth, pillW, originOffset, pillX, pillWidth]);
+    const { left, right } = slotBounds(index);
+    if (animated) {
+      animate(leftEdge, left, MOVE_SPRING);
+      animate(rightEdge, right, MOVE_SPRING);
+    } else {
+      leftEdge.set(left);
+      rightEdge.set(right);
+    }
+  }, [slotWidth, slotBounds, leftEdge, rightEdge]);
 
   useEffect(() => {
+    anchorIndexRef.current = indexOf(active);
     if (!dragRef.current.dragging) moveToIndex(indexOf(active), false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contentWidth, originOffset]);
 
   const prevActiveRef = useRef(active);
   useEffect(() => {
+    anchorIndexRef.current = indexOf(active);
     if (prevActiveRef.current !== active && !dragRef.current.dragging) {
       moveToIndex(indexOf(active), true);
     }
@@ -116,10 +135,12 @@ export default function Navbar({ config }) {
 
   const handleTabClick = useCallback((key) => {
     suppressSpyFor();
+    anchorIndexRef.current = indexOf(key);
     setActive(key);
-  }, [suppressSpyFor]);
+  }, [suppressSpyFor, indexOf]);
 
   const handlePointerDown = (e) => {
+    anchorIndexRef.current = indexOf(active);
     dragRef.current = { dragging: true, startX: e.clientX, moved: false };
     tabWrapRef.current?.setPointerCapture?.(e.pointerId);
   };
@@ -134,20 +155,43 @@ export default function Navbar({ config }) {
     const wrapRect = wrap.getBoundingClientRect();
     const style = getComputedStyle(wrap);
     const borderLeft = parseFloat(style.borderLeftWidth) || 0;
-    // Same local coordinate system the pill's x uses: origin just inside the border.
     const fingerLocal = e.clientX - wrapRect.left - borderLeft;
+    const fingerClamped = Math.max(originOffset, Math.min(fingerLocal, originOffset + contentWidth));
 
-    const minX = originOffset + PILL_INSET;
-    const maxX = originOffset + contentWidth - pillW - PILL_INSET;
-    const clampedLeft = Math.max(minX, Math.min(fingerLocal - pillW / 2, maxX));
+    // ── Anchor with hysteresis: only re-target the pinned tab once the
+    // finger has crossed DEAD_ZONE px past the boundary, so sitting near
+    // an edge doesn't make the anchor (and the whole stretch) flicker. ──
+    const anchorIndex = anchorIndexRef.current;
+    const anchorCenter = originOffset + anchorIndex * slotWidth + slotWidth / 2;
+    if (fingerClamped > anchorCenter && anchorIndex < navItems.length - 1) {
+      const boundary = originOffset + (anchorIndex + 1) * slotWidth;
+      if (fingerClamped > boundary + DEAD_ZONE) anchorIndexRef.current = anchorIndex + 1;
+    } else if (fingerClamped < anchorCenter && anchorIndex > 0) {
+      const boundary = originOffset + anchorIndex * slotWidth;
+      if (fingerClamped < boundary - DEAD_ZONE) anchorIndexRef.current = anchorIndex - 1;
+    }
 
-    pillWidth.set(pillW);
-    pillX.set(clampedLeft);
+    const settledIndex = anchorIndexRef.current;
+    const settledKey = navItems[settledIndex].to;
+    if (settledKey !== active) setActive(settledKey);
 
-    const contentLocalCenter = clampedLeft + pillW / 2 - originOffset;
-    const nearestIndex = Math.max(0, Math.min(Math.floor(contentLocalCenter / slotWidth), navItems.length - 1));
-    const nearestKey = navItems[nearestIndex].to;
-    if (nearestKey !== active) setActive(nearestKey);
+    // ── Stretch: pin the edge behind the finger to the anchor tab's own
+    // slot edge; let the edge in front chase the finger, capped at one
+    // extra slot-width so it can never smear across the whole bar. ──
+    const { left: anchorLeft, right: anchorRight } = slotBounds(settledIndex);
+    const maxStretch = slotWidth * MAX_STRETCH_RATIO;
+    const barMinX = originOffset + PILL_INSET;
+    const barMaxX = originOffset + contentWidth - PILL_INSET;
+
+    if (fingerClamped >= (anchorLeft + anchorRight) / 2) {
+      leftEdge.set(anchorLeft);
+      const stretched = Math.max(anchorRight, Math.min(fingerClamped, anchorRight + maxStretch));
+      rightEdge.set(Math.min(stretched, barMaxX));
+    } else {
+      rightEdge.set(anchorRight);
+      const stretched = Math.min(anchorLeft, Math.max(fingerClamped, anchorLeft - maxStretch));
+      leftEdge.set(Math.max(stretched, barMinX));
+    }
   };
 
   const handlePointerUp = () => {
@@ -156,7 +200,7 @@ export default function Navbar({ config }) {
     dragRef.current.dragging = false;
     if (wasDrag) {
       suppressSpyFor();
-      moveToIndex(indexOf(active), true);
+      moveToIndex(anchorIndexRef.current, true); // snap the stretch back to a clean pill
       scroller.scrollTo(active, { smooth: true, duration: SCROLL_DURATION, offset: -40 });
     }
   };
@@ -180,7 +224,7 @@ export default function Navbar({ config }) {
             {navItems.map(({ label, to, Icon }) => (
               <li key={to}>
                 <Link
-                  to={to} smooth duration={SCROLL_DURATION} spy offset={-90}
+                  to={to} smooth duration={SCROLL_DURATION} spy={!isMobile} offset={-90}
                   className="ios-nav-link"
                   activeClass="active"
                   onClick={() => handleTabClick(to)}
@@ -219,7 +263,7 @@ export default function Navbar({ config }) {
           {contentWidth > 0 && (
             <motion.span
               className="tab-pill"
-              style={{ x: pillX, width: pillWidth }}
+              style={{ x: leftEdge, width: pillWidth }}
             />
           )}
 
@@ -228,7 +272,7 @@ export default function Navbar({ config }) {
             return (
               <div key={to} className="ios-tab-slot">
                 <Link
-                  to={to} smooth duration={SCROLL_DURATION} spy offset={-40}
+                  to={to} smooth duration={SCROLL_DURATION} spy={isMobile} offset={-40}
                   className={`ios-tab-item${isActive ? ' tab-active' : ''}`}
                   onClick={() => handleTabClick(to)}
                   onSetActive={() => handleSpyActive(to)}
