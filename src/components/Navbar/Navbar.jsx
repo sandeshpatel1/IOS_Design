@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect, useCallback, useLayoutEffect } from 'react';
 import { Link, scroller } from 'react-scroll';
-import { motion, useMotionValue, useTransform, animate } from 'framer-motion';
+import {
+  motion, useMotionValue, useTransform, useVelocity, useSpring, animate,
+} from 'framer-motion';
 import {
   HiOutlineHome, HiOutlineUser, HiOutlineSparkles,
   HiOutlineSquares2X2, HiOutlineChatBubbleLeftRight,
@@ -22,14 +24,16 @@ const SPY_SUPPRESS_MS = SCROLL_DURATION + 200;
 const PILL_INSET = 2;
 const MOBILE_BREAKPOINT = '(max-width: 900px)';
 
-// ── Stretch tuning ──
-const DEAD_ZONE = 10;      // px the finger must cross past a slot boundary
-                            // before the anchor re-targets to the next tab —
-                            // without this, sitting near a boundary makes
-                            // the anchor flicker back and forth every frame.
-const MAX_STRETCH_RATIO = 1; // stretch caps at 1x a slot-width beyond the
-                              // anchor's own edge, so the pill can't smear
-                              // across the whole bar on a fast/long drag.
+// ── Liquid stretch tuning ──
+// The pill's CENTRE always sits exactly under the finger (or exactly on the
+// active tab's centre when idle) — there is no per-tab "anchor" that jumps
+// between slots anymore, which is what caused the old discrete/disrupted
+// feel. Instead, the pill's WIDTH reacts to how fast the centre is moving:
+// fast = stretched (rubber band), slow/stopped = relaxed back to a normal
+// circle. That relationship is what makes it "flow" instead of "step".
+const STRETCH_VELOCITY_FACTOR = 0.11; // extra px of width per px/s of centre speed
+const MAX_STRETCH_SLOTS = 1.6;        // cap stretch at ~1.6 tab-slots of extra width
+const VELOCITY_SPRING = { stiffness: 180, damping: 22, mass: 0.55 }; // decides how "rubbery" the snap-back feels
 
 export default function Navbar({ config }) {
   const [active, setActive] = useState('home');
@@ -50,7 +54,13 @@ export default function Navbar({ config }) {
 
   const tabWrapRef = useRef(null);
   const dragRef = useRef({ dragging: false, startX: 0, moved: false });
-  const anchorIndexRef = useRef(0); // which tab's edge is currently "pinned"
+
+  // `active` is read inside pointer-move/up handlers via a ref, not the
+  // React state closure directly — plain state can be one render stale
+  // inside a fast pointer-move burst, which previously caused the pill to
+  // settle on the wrong tab on release.
+  const activeRef = useRef(active);
+  useEffect(() => { activeRef.current = active; }, [active]);
 
   const [layout, setLayout] = useState({ contentWidth: 0, originOffset: 0 });
 
@@ -74,50 +84,68 @@ export default function Navbar({ config }) {
 
   const { contentWidth, originOffset } = layout;
   const slotWidth = contentWidth / navItems.length;
+  const baseWidth = Math.max(slotWidth - PILL_INSET * 2, 10);
 
   const indexOf = useCallback((key) => {
     const i = navItems.findIndex(t => t.to === key);
     return i === -1 ? 0 : i;
   }, []);
 
-  // Two independent edges instead of one x + fixed width — a stretch needs
-  // two points that can move apart from each other. Width is derived, not
-  // stored, so it's always mathematically consistent with the edges.
-  const leftEdge = useMotionValue(0);
-  const rightEdge = useMotionValue(64);
-  const pillWidth = useTransform([leftEdge, rightEdge], ([l, r]) => Math.max(r - l, 0));
+  const centerXFor = useCallback((index) => (
+    originOffset + index * slotWidth + slotWidth / 2
+  ), [originOffset, slotWidth]);
 
-  const slotBounds = useCallback((index) => ({
-    left: originOffset + index * slotWidth + PILL_INSET,
-    right: originOffset + (index + 1) * slotWidth - PILL_INSET,
-  }), [originOffset, slotWidth]);
+  // ── Single motion value drives everything ──
+  // fingerX = where the pill's centre currently is (local coords). While
+  // dragging it's set 1:1 to the pointer every frame (no lag, no easing —
+  // it always sits exactly under the finger). While idle it's spring-
+  // animated to the active tab's centre. Either way, its OWN velocity is
+  // what feeds the rubber-band width below, so taps/clicks get a subtle
+  // stretch too, not just drags.
+  const fingerX = useMotionValue(0);
+  const rawVelocity = useVelocity(fingerX);
+  const smoothVelocity = useSpring(rawVelocity, VELOCITY_SPRING);
 
-  const moveToIndex = useCallback((index, animated = true) => {
-    if (!slotWidth) return;
-    const { left, right } = slotBounds(index);
-    if (animated) {
-      animate(leftEdge, left, MOVE_SPRING);
-      animate(rightEdge, right, MOVE_SPRING);
-    } else {
-      leftEdge.set(left);
-      rightEdge.set(right);
-    }
-  }, [slotWidth, slotBounds, leftEdge, rightEdge]);
+  const stretch = useTransform(smoothVelocity, (v) => {
+    const maxStretch = slotWidth * MAX_STRETCH_SLOTS;
+    if (!maxStretch) return 0;
+    return Math.min(Math.abs(v) * STRETCH_VELOCITY_FACTOR, maxStretch);
+  });
 
+  // scaleX (a transform) instead of animating `width` directly — keeps the
+  // stretch effect fully GPU-compositable instead of triggering layout on
+  // every frame of the drag.
+  const pillScaleX = useTransform(stretch, (extra) => (
+    baseWidth ? (baseWidth + extra) / baseWidth : 1
+  ));
+
+  // Position the (unscaled) box so that once scaleX is applied around its
+  // own centre, the visible pill is centred exactly on fingerX.
+  const pillX = useTransform(fingerX, (cx) => cx - baseWidth / 2);
+
+  const moveToCenter = useCallback((index, animated = true) => {
+    if (!contentWidth) return;
+    const cx = centerXFor(index);
+    if (animated) animate(fingerX, cx, MOVE_SPRING);
+    else fingerX.set(cx);
+  }, [contentWidth, centerXFor, fingerX]);
+
+  // Re-place (instantly) on measure/resize.
   useEffect(() => {
-    anchorIndexRef.current = indexOf(active);
-    if (!dragRef.current.dragging) moveToIndex(indexOf(active), false);
+    if (!dragRef.current.dragging) moveToCenter(indexOf(active), false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contentWidth, originOffset]);
 
+  // Animate to the new tab's centre whenever the active tab changes for
+  // any reason (click, scroll-spy) as long as we're not mid-drag — the
+  // drag handler owns fingerX exclusively while dragging.
   const prevActiveRef = useRef(active);
   useEffect(() => {
-    anchorIndexRef.current = indexOf(active);
     if (prevActiveRef.current !== active && !dragRef.current.dragging) {
-      moveToIndex(indexOf(active), true);
+      moveToCenter(indexOf(active), true);
     }
     prevActiveRef.current = active;
-  }, [active, indexOf, moveToIndex]);
+  }, [active, indexOf, moveToCenter]);
 
   const suppressSpyRef = useRef(false);
   const suppressTimeoutRef = useRef(null);
@@ -135,12 +163,10 @@ export default function Navbar({ config }) {
 
   const handleTabClick = useCallback((key) => {
     suppressSpyFor();
-    anchorIndexRef.current = indexOf(key);
     setActive(key);
-  }, [suppressSpyFor, indexOf]);
+  }, [suppressSpyFor]);
 
   const handlePointerDown = (e) => {
-    anchorIndexRef.current = indexOf(active);
     dragRef.current = { dragging: true, startX: e.clientX, moved: false };
     tabWrapRef.current?.setPointerCapture?.(e.pointerId);
   };
@@ -156,42 +182,19 @@ export default function Navbar({ config }) {
     const style = getComputedStyle(wrap);
     const borderLeft = parseFloat(style.borderLeftWidth) || 0;
     const fingerLocal = e.clientX - wrapRect.left - borderLeft;
-    const fingerClamped = Math.max(originOffset, Math.min(fingerLocal, originOffset + contentWidth));
 
-    // ── Anchor with hysteresis: only re-target the pinned tab once the
-    // finger has crossed DEAD_ZONE px past the boundary, so sitting near
-    // an edge doesn't make the anchor (and the whole stretch) flicker. ──
-    const anchorIndex = anchorIndexRef.current;
-    const anchorCenter = originOffset + anchorIndex * slotWidth + slotWidth / 2;
-    if (fingerClamped > anchorCenter && anchorIndex < navItems.length - 1) {
-      const boundary = originOffset + (anchorIndex + 1) * slotWidth;
-      if (fingerClamped > boundary + DEAD_ZONE) anchorIndexRef.current = anchorIndex + 1;
-    } else if (fingerClamped < anchorCenter && anchorIndex > 0) {
-      const boundary = originOffset + anchorIndex * slotWidth;
-      if (fingerClamped < boundary - DEAD_ZONE) anchorIndexRef.current = anchorIndex - 1;
-    }
+    // The pill's centre follows the finger directly, every frame, with no
+    // easing and no per-tab re-targeting — this is what makes it flow
+    // continuously end-to-end instead of stepping. `.tabbar-inner` already
+    // has `overflow: hidden`, so a small overshoot past the bar's own edge
+    // during a fast flick is simply clipped rather than needing exact
+    // clamping math here.
+    fingerX.set(fingerLocal);
 
-    const settledIndex = anchorIndexRef.current;
-    const settledKey = navItems[settledIndex].to;
-    if (settledKey !== active) setActive(settledKey);
-
-    // ── Stretch: pin the edge behind the finger to the anchor tab's own
-    // slot edge; let the edge in front chase the finger, capped at one
-    // extra slot-width so it can never smear across the whole bar. ──
-    const { left: anchorLeft, right: anchorRight } = slotBounds(settledIndex);
-    const maxStretch = slotWidth * MAX_STRETCH_RATIO;
-    const barMinX = originOffset + PILL_INSET;
-    const barMaxX = originOffset + contentWidth - PILL_INSET;
-
-    if (fingerClamped >= (anchorLeft + anchorRight) / 2) {
-      leftEdge.set(anchorLeft);
-      const stretched = Math.max(anchorRight, Math.min(fingerClamped, anchorRight + maxStretch));
-      rightEdge.set(Math.min(stretched, barMaxX));
-    } else {
-      rightEdge.set(anchorRight);
-      const stretched = Math.min(anchorLeft, Math.max(fingerClamped, anchorLeft - maxStretch));
-      leftEdge.set(Math.max(stretched, barMinX));
-    }
+    const rawIndex = Math.floor((fingerLocal - originOffset) / slotWidth);
+    const nearest = Math.max(0, Math.min(navItems.length - 1, rawIndex));
+    const nearestKey = navItems[nearest].to;
+    if (nearestKey !== activeRef.current) setActive(nearestKey);
   };
 
   const handlePointerUp = () => {
@@ -200,8 +203,11 @@ export default function Navbar({ config }) {
     dragRef.current.dragging = false;
     if (wasDrag) {
       suppressSpyFor();
-      moveToIndex(anchorIndexRef.current, true); // snap the stretch back to a clean pill
-      scroller.scrollTo(active, { smooth: true, duration: SCROLL_DURATION, offset: -40 });
+      // Spring the centre onto the settled tab — combined with the
+      // velocity-driven width, this is what makes the pill visibly relax
+      // back into a clean circle as it arrives (the rubber-band settle).
+      moveToCenter(indexOf(activeRef.current), true);
+      scroller.scrollTo(activeRef.current, { smooth: true, duration: SCROLL_DURATION, offset: -40 });
     }
   };
 
@@ -263,7 +269,7 @@ export default function Navbar({ config }) {
           {contentWidth > 0 && (
             <motion.span
               className="tab-pill"
-              style={{ x: leftEdge, width: pillWidth }}
+              style={{ x: pillX, scaleX: pillScaleX, width: baseWidth }}
             />
           )}
 
