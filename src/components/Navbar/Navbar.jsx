@@ -136,35 +136,48 @@ export default function Navbar({ config }) {
     Math.min(Math.abs(v) * STRETCH_VELOCITY_FACTOR, MAX_PILL_STRETCH_PX)
   ));
 
-  // scaleX (a transform) instead of animating `width` directly — keeps the
-  // stretch effect fully GPU-compositable instead of triggering layout on
-  // every frame of the drag.
-  const pillScaleX = useTransform(pillStretch, (extra) => (
-    baseWidth ? (baseWidth + extra) / baseWidth : 1
-  ));
-  const pillX = useTransform(fingerX, (cx) => cx - baseWidth / 2);
-
-  // ── Elastic background derivation ──
-  // Purely a function of where the pill's edges currently are relative to
-  // the bar's resting content bounds, THEN clamped per-side to the real
-  // screen slack measured above — so however far the pill itself wants to
-  // push, the visible bulge can never physically exceed the room actually
-  // available on that side of the screen. Positive = growing right,
-  // negative = growing left.
-  const clampedOverflow = useTransform([fingerX, pillStretch], ([cx, extra]) => {
+  // ── Pill edges (now the single source of truth) ──
+  // Previously the pill rendered from raw fingerX + pillStretch with no
+  // awareness of how much room was actually safe — so once the background
+  // hit its screen-edge cap and stopped growing, the pill kept going and
+  // visibly poked out past it. Now the pill's own edges are clamped first,
+  // using the same screen-slack caps as the background, and everything
+  // else (the background, the sympathetic whole-bar stretch) is derived
+  // FROM these already-clamped edges — so the pill can never exceed what
+  // the background is actually showing, by construction.
+  const pillEdges = useTransform([fingerX, pillStretch], ([cx, extra]) => {
     const half = (baseWidth + extra) / 2;
-    const rightEdge = cx + half;
-    const leftEdge = cx - half;
+    const desiredRight = cx + half;
+    const desiredLeft = cx - half;
     const barMin = originOffset;
     const barMax = originOffset + contentWidth;
-    const overRight = Math.max(0, rightEdge - barMax);
-    const overLeft = Math.max(0, barMin - leftEdge);
-
     const rightCap = Math.max(0, rightSlack - BG_EDGE_BUFFER);
     const leftCap = Math.max(0, leftSlack - BG_EDGE_BUFFER);
-    const cRight = Math.min(overRight, rightCap);
-    const cLeft = Math.min(overLeft, leftCap);
-    return cRight >= cLeft ? cRight : -cLeft;
+    const right = Math.min(desiredRight, barMax + rightCap);
+    const left = Math.max(desiredLeft, barMin - leftCap);
+    return [left, right];
+  });
+
+  // Left-anchored transform (x + scaleX from the left edge) instead of the
+  // earlier centre+scale approach — that only supported symmetric growth,
+  // which can't represent "this edge got clamped but that one didn't".
+  // Mathematically identical to the old approach whenever nothing is
+  // clamped, so the normal in-bounds feel is unchanged.
+  const pillX = useTransform(pillEdges, ([l]) => l);
+  const pillScaleX = useTransform(pillEdges, ([l, r]) => (
+    baseWidth ? Math.max(r - l, 6) / baseWidth : 1
+  ));
+
+  // ── Elastic background derivation ──
+  // Envelopes the pill's OWN already-clamped edges (plus a small buffer),
+  // rather than recomputing overflow independently — so the two can never
+  // drift out of sync with each other.
+  const clampedOverflow = useTransform(pillEdges, ([l, r]) => {
+    const barMin = originOffset;
+    const barMax = originOffset + contentWidth;
+    const overRight = Math.max(0, r - barMax);
+    const overLeft = Math.max(0, barMin - l);
+    return overRight >= overLeft ? overRight : -overLeft;
   });
 
   // Fixed transform-origin at the left edge for both directions — growing
