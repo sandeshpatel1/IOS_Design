@@ -24,16 +24,26 @@ const SPY_SUPPRESS_MS = SCROLL_DURATION + 200;
 const PILL_INSET = 2;
 const MOBILE_BREAKPOINT = '(max-width: 900px)';
 
-// ── Liquid stretch tuning ──
+// ── Liquid pill stretch (unchanged from before) ──
 // The pill's CENTRE always sits exactly under the finger (or exactly on the
-// active tab's centre when idle) — there is no per-tab "anchor" that jumps
-// between slots anymore, which is what caused the old discrete/disrupted
-// feel. Instead, the pill's WIDTH reacts to how fast the centre is moving:
-// fast = stretched (rubber band), slow/stopped = relaxed back to a normal
-// circle. That relationship is what makes it "flow" instead of "step".
-const STRETCH_VELOCITY_FACTOR = 0.11; // extra px of width per px/s of centre speed
+// active tab's centre when idle) — no per-tab "anchor" that jumps between
+// slots. Its WIDTH reacts to how fast the centre is moving: fast = stretched
+// (rubber band), slow/stopped = relaxed back to a normal circle.
+const STRETCH_VELOCITY_FACTOR = 0.11; // extra px of pill width per px/s of centre speed
 const MAX_STRETCH_SLOTS = 1.6;        // cap stretch at ~1.6 tab-slots of extra width
-const VELOCITY_SPRING = { stiffness: 180, damping: 22, mass: 0.55 }; // decides how "rubbery" the snap-back feels
+const VELOCITY_SPRING = { stiffness: 180, damping: 22, mass: 0.55 }; // "rubberiness" of the pill's own snap-back
+
+// ── Elastic navbar edges (new) ──
+// Dragging the finger past the bar's own bounds now has resistance instead
+// of following 1:1 — the classic rubber-band pull. The background layer
+// (`.tabbar-elastic-bg`) is a separate element behind the icons whose width
+// is derived every frame from wherever the pill currently is, so it always
+// grows just enough on whichever side the pill is pushing toward and never
+// lets the pill get visually cut off, then relaxes back the instant the
+// pill is back inside the resting bounds.
+const OVERSHOOT_RESISTANCE = 0.45; // 0..1 — lower = more resistance pulling the finger
+const MAX_FINGER_OVERSHOOT = 30;   // px the pill's centre can be dragged past the bar's edge
+const BG_EDGE_BUFFER = 6;          // px slack so the bg's rounded corner always clears the pill's
 
 export default function Navbar({ config }) {
   const [active, setActive] = useState('home');
@@ -62,7 +72,7 @@ export default function Navbar({ config }) {
   const activeRef = useRef(active);
   useEffect(() => { activeRef.current = active; }, [active]);
 
-  const [layout, setLayout] = useState({ contentWidth: 0, originOffset: 0 });
+  const [layout, setLayout] = useState({ contentWidth: 0, originOffset: 0, barWidth: 0 });
 
   useLayoutEffect(() => {
     const wrap = tabWrapRef.current;
@@ -74,6 +84,7 @@ export default function Navbar({ config }) {
       setLayout({
         contentWidth: wrap.clientWidth - paddingLeft - paddingRight,
         originOffset: paddingLeft,
+        barWidth: wrap.getBoundingClientRect().width,
       });
     };
     measure();
@@ -82,7 +93,7 @@ export default function Navbar({ config }) {
     return () => ro.disconnect();
   }, []);
 
-  const { contentWidth, originOffset } = layout;
+  const { contentWidth, originOffset, barWidth } = layout;
   const slotWidth = contentWidth / navItems.length;
   const baseWidth = Math.max(slotWidth - PILL_INSET * 2, 10);
 
@@ -95,18 +106,12 @@ export default function Navbar({ config }) {
     originOffset + index * slotWidth + slotWidth / 2
   ), [originOffset, slotWidth]);
 
-  // ── Single motion value drives everything ──
-  // fingerX = where the pill's centre currently is (local coords). While
-  // dragging it's set 1:1 to the pointer every frame (no lag, no easing —
-  // it always sits exactly under the finger). While idle it's spring-
-  // animated to the active tab's centre. Either way, its OWN velocity is
-  // what feeds the rubber-band width below, so taps/clicks get a subtle
-  // stretch too, not just drags.
+  // ── Pill motion values ──
   const fingerX = useMotionValue(0);
   const rawVelocity = useVelocity(fingerX);
   const smoothVelocity = useSpring(rawVelocity, VELOCITY_SPRING);
 
-  const stretch = useTransform(smoothVelocity, (v) => {
+  const pillStretch = useTransform(smoothVelocity, (v) => {
     const maxStretch = slotWidth * MAX_STRETCH_SLOTS;
     if (!maxStretch) return 0;
     return Math.min(Math.abs(v) * STRETCH_VELOCITY_FACTOR, maxStretch);
@@ -115,13 +120,35 @@ export default function Navbar({ config }) {
   // scaleX (a transform) instead of animating `width` directly — keeps the
   // stretch effect fully GPU-compositable instead of triggering layout on
   // every frame of the drag.
-  const pillScaleX = useTransform(stretch, (extra) => (
+  const pillScaleX = useTransform(pillStretch, (extra) => (
     baseWidth ? (baseWidth + extra) / baseWidth : 1
   ));
-
-  // Position the (unscaled) box so that once scaleX is applied around its
-  // own centre, the visible pill is centred exactly on fingerX.
   const pillX = useTransform(fingerX, (cx) => cx - baseWidth / 2);
+
+  // ── Elastic background derivation ──
+  // Purely a function of where the pill's edges currently are relative to
+  // the bar's resting content bounds — no separate state to keep in sync.
+  // Positive = pill pushing past the right bound, negative = past the left.
+  const bgOverflow = useTransform([fingerX, pillStretch], ([cx, extra]) => {
+    const half = (baseWidth + extra) / 2;
+    const rightEdge = cx + half;
+    const leftEdge = cx - half;
+    const barMin = originOffset;
+    const barMax = originOffset + contentWidth;
+    const overRight = Math.max(0, rightEdge - barMax);
+    const overLeft = Math.max(0, barMin - leftEdge);
+    return overRight >= overLeft ? overRight : -overLeft;
+  });
+
+  // Fixed transform-origin at the left edge for both directions — growing
+  // right is a plain scale from x:0; growing left is the same scale plus a
+  // compensating negative x so the RIGHT edge stays anchored instead.
+  const bgScaleX = useTransform(bgOverflow, (o) => {
+    if (!barWidth) return 1;
+    const extra = Math.abs(o);
+    return extra > 0 ? (barWidth + extra + BG_EDGE_BUFFER) / barWidth : 1;
+  });
+  const bgX = useTransform(bgOverflow, (o) => (o < 0 ? o - BG_EDGE_BUFFER : 0));
 
   const moveToCenter = useCallback((index, animated = true) => {
     if (!contentWidth) return;
@@ -183,13 +210,20 @@ export default function Navbar({ config }) {
     const borderLeft = parseFloat(style.borderLeftWidth) || 0;
     const fingerLocal = e.clientX - wrapRect.left - borderLeft;
 
-    // The pill's centre follows the finger directly, every frame, with no
-    // easing and no per-tab re-targeting — this is what makes it flow
-    // continuously end-to-end instead of stepping. `.tabbar-inner` already
-    // has `overflow: hidden`, so a small overshoot past the bar's own edge
-    // during a fast flick is simply clipped rather than needing exact
-    // clamping math here.
-    fingerX.set(fingerLocal);
+    // Rubber-band resistance once the finger goes past the bar's own
+    // content bounds — the pill's centre keeps moving but slower, capped
+    // at MAX_FINGER_OVERSHOOT, instead of tracking the raw finger 1:1. The
+    // elastic background (bgOverflow, above) reacts automatically to this
+    // same fingerX value, so the two always move together.
+    const barMin = originOffset;
+    const barMax = originOffset + contentWidth;
+    let targetX = fingerLocal;
+    if (fingerLocal > barMax) {
+      targetX = barMax + Math.min((fingerLocal - barMax) * OVERSHOOT_RESISTANCE, MAX_FINGER_OVERSHOOT);
+    } else if (fingerLocal < barMin) {
+      targetX = barMin - Math.min((barMin - fingerLocal) * OVERSHOOT_RESISTANCE, MAX_FINGER_OVERSHOOT);
+    }
+    fingerX.set(targetX);
 
     const rawIndex = Math.floor((fingerLocal - originOffset) / slotWidth);
     const nearest = Math.max(0, Math.min(navItems.length - 1, rawIndex));
@@ -203,9 +237,9 @@ export default function Navbar({ config }) {
     dragRef.current.dragging = false;
     if (wasDrag) {
       suppressSpyFor();
-      // Spring the centre onto the settled tab — combined with the
-      // velocity-driven width, this is what makes the pill visibly relax
-      // back into a clean circle as it arrives (the rubber-band settle).
+      // Spring the centre back onto the settled tab — bgOverflow is
+      // derived from fingerX, so the elastic edge relaxes back to normal
+      // automatically as this settles, no separate "snap back" needed.
       moveToCenter(indexOf(activeRef.current), true);
       scroller.scrollTo(activeRef.current, { smooth: true, duration: SCROLL_DURATION, offset: -40 });
     }
@@ -266,6 +300,13 @@ export default function Navbar({ config }) {
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerUp}
         >
+          {barWidth > 0 && (
+            <motion.div
+              className="tabbar-elastic-bg"
+              style={{ x: bgX, scaleX: bgScaleX }}
+            />
+          )}
+
           {contentWidth > 0 && (
             <motion.span
               className="tab-pill"

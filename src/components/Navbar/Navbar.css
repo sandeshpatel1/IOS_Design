@@ -69,8 +69,15 @@
     padding: 0 14px;
     pointer-events: none;
   }
+
+  /* Layout-only now: positions icons + the pill, but carries NO visible
+     styling of its own and does not clip. The elastic background layer
+     below is what's actually seen and what's allowed to stretch past this
+     box's own resting width — if this stayed `overflow: hidden` like
+     before, the elastic layer's whole point (letting the bulge show
+     instead of getting cut off) would be defeated. */
   .ios-tabbar-inner {
-    overflow: hidden;
+    overflow: visible;
     pointer-events: auto;
     position: relative;
     display: flex; align-items: center;
@@ -78,7 +85,27 @@
     width: 100%; max-width: 380px;
     height: 60px;
     padding: 0 3px;
+    /* Custom drag gesture owns horizontal movement here — stop the browser
+       from also trying to pan/scroll the page from a touch that starts
+       inside the bar. */
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+  }
+
+  /* The actual visible capsule — background, border, blur, shadow all live
+     here now instead of on .ios-tabbar-inner. Absolutely positioned to
+     fill the resting box exactly (inset: 0), then stretched via transform
+     (x + scaleX) from Navbar.jsx as the pill pushes toward either edge.
+     transform-only so the stretch stays fully GPU-compositable, same
+     principle as the pill's own stretch. */
+  .tabbar-elastic-bg {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
     border-radius: 30px;
+    transform-origin: left center;
+    will-change: transform;
     /* Heavy/opaque, like Instagram's real tab bar — a structural surface,
        not a light chip. Thin, barely-there glass here is what let page
        content underneath visually bleed through and read as "extra,
@@ -93,12 +120,8 @@
     backdrop-filter: blur(40px) saturate(180%);
     -webkit-backdrop-filter: blur(40px) saturate(180%);
     box-shadow: 0 20px 50px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.07);
-    /* Custom drag gesture owns horizontal movement here — stop the browser
-       from also trying to pan/scroll the page from a touch that starts
-       inside the bar. */
-    touch-action: none;
-    -webkit-user-select: none; user-select: none;
   }
+
   .ios-tab-slot { flex: 1; display: flex; min-width: 0; }
   .ios-tab-item {
     position: relative;
@@ -110,11 +133,12 @@
   }
 
   /* Instagram-style highlight: constant-size rounded pill, positioned
-     purely via `transform: translateX()` — never `left` — so the browser
-     never has to re-run layout while it moves. GPU-compositable only. */
+     purely via `transform: translateX()`/`scaleX()` — never `left` or
+     `width` — so the browser never has to re-run layout while it moves or
+     stretches. GPU-compositable only. */
      .tab-pill {
       position: absolute;
-      top: 2px; bottom: 2px;         /* was: top: 4px; height: 52px; */
+      top: 2px; bottom: 2px;
       left: 0;
       border-radius: 25px;
       background: rgba(255,255,255,0.14);
