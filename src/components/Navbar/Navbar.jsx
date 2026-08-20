@@ -28,9 +28,11 @@ const MOBILE_BREAKPOINT = '(max-width: 900px)';
 // The pill's CENTRE always sits exactly under the finger (or exactly on the
 // active tab's centre when idle) — no per-tab "anchor" that jumps between
 // slots. Its WIDTH reacts to how fast the centre is moving: fast = stretched
-// (rubber band), slow/stopped = relaxed back to a normal circle.
-const STRETCH_VELOCITY_FACTOR = 0.11; // extra px of pill width per px/s of centre speed
-const MAX_STRETCH_SLOTS = 1.6;        // cap stretch at ~1.6 tab-slots of extra width
+// (rubber band), slow/stopped = relaxed back to a normal circle. Kept
+// deliberately subtle (single-digit px) — a small stretch reads as fluid
+// and smooth, a large one reads as "broken" or rubbery in a bad way.
+const STRETCH_VELOCITY_FACTOR = 0.02; // extra px of pill width per px/s of centre speed
+const MAX_PILL_STRETCH_PX = 9;        // hard cap on the pill's own extra width, in px
 const VELOCITY_SPRING = { stiffness: 180, damping: 22, mass: 0.55 }; // "rubberiness" of the pill's own snap-back
 
 // ── Elastic navbar edges (new) ──
@@ -40,10 +42,11 @@ const VELOCITY_SPRING = { stiffness: 180, damping: 22, mass: 0.55 }; // "rubberi
 // is derived every frame from wherever the pill currently is, so it always
 // grows just enough on whichever side the pill is pushing toward and never
 // lets the pill get visually cut off, then relaxes back the instant the
-// pill is back inside the resting bounds.
-const OVERSHOOT_RESISTANCE = 0.45; // 0..1 — lower = more resistance pulling the finger
-const MAX_FINGER_OVERSHOOT = 30;   // px the pill's centre can be dragged past the bar's edge
-const BG_EDGE_BUFFER = 6;          // px slack so the bg's rounded corner always clears the pill's
+// pill is back inside the resting bounds. Same "keep it small" rule as the
+// pill stretch above — a few px reads as premium, more reads as sloppy.
+const OVERSHOOT_RESISTANCE = 0.35; // 0..1 — lower = more resistance pulling the finger
+const MAX_FINGER_OVERSHOOT = 8;    // px the pill's centre can be dragged past the bar's edge
+const BG_EDGE_BUFFER = 4;          // px slack so the bg's rounded corner always clears the pill's
 
 export default function Navbar({ config }) {
   const [active, setActive] = useState('home');
@@ -111,11 +114,9 @@ export default function Navbar({ config }) {
   const rawVelocity = useVelocity(fingerX);
   const smoothVelocity = useSpring(rawVelocity, VELOCITY_SPRING);
 
-  const pillStretch = useTransform(smoothVelocity, (v) => {
-    const maxStretch = slotWidth * MAX_STRETCH_SLOTS;
-    if (!maxStretch) return 0;
-    return Math.min(Math.abs(v) * STRETCH_VELOCITY_FACTOR, maxStretch);
-  });
+  const pillStretch = useTransform(smoothVelocity, (v) => (
+    Math.min(Math.abs(v) * STRETCH_VELOCITY_FACTOR, MAX_PILL_STRETCH_PX)
+  ));
 
   // scaleX (a transform) instead of animating `width` directly — keeps the
   // stretch effect fully GPU-compositable instead of triggering layout on
