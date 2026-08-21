@@ -24,7 +24,14 @@
   overflow: hidden;
   padding: 26px;
   display: flex; flex-direction: column;
+  cursor: pointer;
+  transition: box-shadow 0.3s var(--ios-ease), border-color 0.3s var(--ios-ease);
 }
+.feat-card:hover {
+  box-shadow: 0 20px 50px rgba(0,0,0,0.35);
+  border-color: var(--glass-border-strong);
+}
+.feat-card:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 .feat-card-glow {
   position: absolute; top: -80px; right: -80px;
   width: 260px; height: 260px; border-radius: 50%;
@@ -62,6 +69,13 @@
   font-size: 0.64rem; font-weight: 700; padding: 4px 10px; border-radius: 100px;
   background: rgba(255,255,255,0.07); color: var(--text-2);
 }
+.feat-open-hint {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 14px; font-size: 0.72rem; font-weight: 700; color: var(--blue);
+  opacity: 0.85; transition: opacity 0.2s, transform 0.2s var(--ios-spring);
+}
+.feat-open-hint svg { font-size: 0.85rem; }
+.feat-card:hover .feat-open-hint { opacity: 1; transform: translateX(3px); }
 
 .feat-browser-wrap {
   position: absolute; right: 24px; bottom: 24px; left: 42%;
@@ -91,9 +105,11 @@
   display: flex; align-items: center; gap: 14px;
   padding: 14px 16px; border-radius: var(--radius-md);
   text-decoration: none; color: var(--text);
+  cursor: pointer;
   transition: transform 0.25s var(--ios-spring), background 0.25s;
 }
 .proj-row:hover { transform: translateX(4px); background: rgba(255,255,255,0.08); }
+.proj-row:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .row-icon {
   width: 46px; height: 46px; border-radius: 13px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
@@ -107,7 +123,9 @@
 .row-get {
   flex-shrink: 0; font-size: 0.7rem; font-weight: 800; color: var(--blue);
   background: rgba(10,132,255,0.12); padding: 6px 16px; border-radius: 100px;
+  text-decoration: none; transition: transform 0.2s var(--ios-spring);
 }
+.row-get:hover { transform: scale(1.06); }
 
 .proj-skel-row { display: flex; gap: 20px; }
 .proj-skel { flex: 0 0 min(560px, 86vw); height: 340px; animation: pulse 1.8s ease-in-out infinite; }

@@ -28,9 +28,11 @@ const MOBILE_BREAKPOINT = '(max-width: 900px)';
 // The pill's CENTRE always sits exactly under the finger (or exactly on the
 // active tab's centre when idle) — no per-tab "anchor" that jumps between
 // slots. Its WIDTH reacts to how fast the centre is moving: fast = stretched
-// (rubber band), slow/stopped = relaxed back to a normal circle.
-const STRETCH_VELOCITY_FACTOR = 0.11; // extra px of pill width per px/s of centre speed
-const MAX_STRETCH_SLOTS = 1.6;        // cap stretch at ~1.6 tab-slots of extra width
+// (rubber band), slow/stopped = relaxed back to a normal circle. Kept
+// deliberately subtle (single-digit px) — a small stretch reads as fluid
+// and smooth, a large one reads as "broken" or rubbery in a bad way.
+const STRETCH_VELOCITY_FACTOR = 0.02; // extra px of pill width per px/s of centre speed
+const MAX_PILL_STRETCH_PX = 9;        // hard cap on the pill's own extra width, in px
 const VELOCITY_SPRING = { stiffness: 180, damping: 22, mass: 0.55 }; // "rubberiness" of the pill's own snap-back
 
 // ── Elastic navbar edges (new) ──
@@ -40,10 +42,18 @@ const VELOCITY_SPRING = { stiffness: 180, damping: 22, mass: 0.55 }; // "rubberi
 // is derived every frame from wherever the pill currently is, so it always
 // grows just enough on whichever side the pill is pushing toward and never
 // lets the pill get visually cut off, then relaxes back the instant the
-// pill is back inside the resting bounds.
-const OVERSHOOT_RESISTANCE = 0.45; // 0..1 — lower = more resistance pulling the finger
-const MAX_FINGER_OVERSHOOT = 30;   // px the pill's centre can be dragged past the bar's edge
-const BG_EDGE_BUFFER = 6;          // px slack so the bg's rounded corner always clears the pill's
+// pill is back inside the resting bounds. Same "keep it small" rule as the
+// pill stretch above — a few px reads as premium, more reads as sloppy.
+const OVERSHOOT_RESISTANCE = 0.35; // 0..1 — lower = more resistance pulling the finger
+const MAX_FINGER_OVERSHOOT = 8;    // px the pill's centre can be dragged past the bar's edge, BEFORE screen-edge clamping
+const BG_EDGE_BUFFER = 4;          // px slack so the bg's rounded corner always clears the pill's
+const SCREEN_EDGE_MARGIN = 6;      // px of breathing room the stretch must always leave from the true screen edge
+
+// The whole bar (icon row included) gets a much smaller "sympathetic"
+// version of the same stretch, so it reads as one elastic piece of rubber
+// rather than just the background capsule moving on its own.
+const SYMPATHETIC_FRACTION = 0.3; // how much of the (already screen-clamped) stretch the whole bar borrows
+const SYMPATHETIC_MAX_PX = 3;     // hard cap on the whole bar's own shift/stretch, in px
 
 export default function Navbar({ config }) {
   const [active, setActive] = useState('home');
@@ -72,7 +82,9 @@ export default function Navbar({ config }) {
   const activeRef = useRef(active);
   useEffect(() => { activeRef.current = active; }, [active]);
 
-  const [layout, setLayout] = useState({ contentWidth: 0, originOffset: 0, barWidth: 0 });
+  const [layout, setLayout] = useState({
+    contentWidth: 0, originOffset: 0, barWidth: 0, leftSlack: 0, rightSlack: 0,
+  });
 
   useLayoutEffect(() => {
     const wrap = tabWrapRef.current;
@@ -81,19 +93,28 @@ export default function Navbar({ config }) {
       const style = getComputedStyle(wrap);
       const paddingLeft = parseFloat(style.paddingLeft) || 0;
       const paddingRight = parseFloat(style.paddingRight) || 0;
+      const rect = wrap.getBoundingClientRect();
+      // How much real room exists between the bar's current edges and the
+      // actual screen edges — this is what the stretch is allowed to use,
+      // never a flat assumed px value, since it varies a lot by device
+      // width (the bar already nearly fills narrow screens, leaving very
+      // little slack on either side).
       setLayout({
         contentWidth: wrap.clientWidth - paddingLeft - paddingRight,
         originOffset: paddingLeft,
-        barWidth: wrap.getBoundingClientRect().width,
+        barWidth: rect.width,
+        leftSlack: Math.max(0, rect.left - SCREEN_EDGE_MARGIN),
+        rightSlack: Math.max(0, window.innerWidth - rect.right - SCREEN_EDGE_MARGIN),
       });
     };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(wrap);
-    return () => ro.disconnect();
+    window.addEventListener('resize', measure);
+    return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
   }, []);
 
-  const { contentWidth, originOffset, barWidth } = layout;
+  const { contentWidth, originOffset, barWidth, leftSlack, rightSlack } = layout;
   const slotWidth = contentWidth / navItems.length;
   const baseWidth = Math.max(slotWidth - PILL_INSET * 2, 10);
 
@@ -111,44 +132,121 @@ export default function Navbar({ config }) {
   const rawVelocity = useVelocity(fingerX);
   const smoothVelocity = useSpring(rawVelocity, VELOCITY_SPRING);
 
-  const pillStretch = useTransform(smoothVelocity, (v) => {
-    const maxStretch = slotWidth * MAX_STRETCH_SLOTS;
-    if (!maxStretch) return 0;
-    return Math.min(Math.abs(v) * STRETCH_VELOCITY_FACTOR, maxStretch);
-  });
-
-  // scaleX (a transform) instead of animating `width` directly — keeps the
-  // stretch effect fully GPU-compositable instead of triggering layout on
-  // every frame of the drag.
-  const pillScaleX = useTransform(pillStretch, (extra) => (
-    baseWidth ? (baseWidth + extra) / baseWidth : 1
+  // Fast-flick stretch — decays to 0 the instant motion stops, which is
+  // exactly right for a mid-bar flick, but WRONG for holding at the edge:
+  // once fingerX gets pinned by the resistance clamp below, its velocity
+  // drops to ~0 even while still actively held there, so this alone would
+  // make the pill shrink back to a circle while you're still dragging.
+  const velocityStretch = useTransform(smoothVelocity, (v) => (
+    Math.min(Math.abs(v) * STRETCH_VELOCITY_FACTOR, MAX_PILL_STRETCH_PX)
   ));
-  const pillX = useTransform(fingerX, (cx) => cx - baseWidth / 2);
 
-  // ── Elastic background derivation ──
-  // Purely a function of where the pill's edges currently are relative to
-  // the bar's resting content bounds — no separate state to keep in sync.
-  // Positive = pill pushing past the right bound, negative = past the left.
-  const bgOverflow = useTransform([fingerX, pillStretch], ([cx, extra]) => {
-    const half = (baseWidth + extra) / 2;
-    const rightEdge = cx + half;
-    const leftEdge = cx - half;
+  // Held-at-edge stretch — purely POSITION-based (how far fingerX is
+  // currently sitting past the bound), so it does NOT decay when velocity
+  // hits zero. Ramps smoothly from 0 up to a generous value as fingerX
+  // approaches its own resistance cap. Deliberately generous on purpose —
+  // pillEdges (below) always clamps the final result to the exact
+  // screen-safe edge anyway, so this only needs to reliably REACH that
+  // edge, not calculate it precisely itself.
+  const overshootPull = useTransform(fingerX, (cx) => {
     const barMin = originOffset;
     const barMax = originOffset + contentWidth;
-    const overRight = Math.max(0, rightEdge - barMax);
-    const overLeft = Math.max(0, barMin - leftEdge);
+    const rightCap = Math.max(0, rightSlack - BG_EDGE_BUFFER);
+    const leftCap = Math.max(0, leftSlack - BG_EDGE_BUFFER);
+
+    if (cx > barMax && rightCap > 0) {
+      const held = cx - barMax;
+      const capDistance = Math.min(MAX_FINGER_OVERSHOOT, rightCap) || 1;
+      const t = Math.min(1, held / capDistance);
+      return t * (rightCap * 2 + 24);
+    }
+    if (cx < barMin && leftCap > 0) {
+      const held = barMin - cx;
+      const capDistance = Math.min(MAX_FINGER_OVERSHOOT, leftCap) || 1;
+      const t = Math.min(1, held / capDistance);
+      return t * (leftCap * 2 + 24);
+    }
+    return 0;
+  });
+
+  // Whichever wants more width wins — a fast flick mid-bar still gets its
+  // snappy velocity stretch, while holding at the edge gets (and keeps)
+  // the fill-to-the-border stretch instead of collapsing.
+  const pillStretch = useTransform(
+    [velocityStretch, overshootPull],
+    ([v, pull]) => Math.max(v, pull)
+  );
+
+  // ── Pill edges (now the single source of truth) ──
+  // Previously the pill rendered from raw fingerX + pillStretch with no
+  // awareness of how much room was actually safe — so once the background
+  // hit its screen-edge cap and stopped growing, the pill kept going and
+  // visibly poked out past it. Now the pill's own edges are clamped first,
+  // using the same screen-slack caps as the background, and everything
+  // else (the background, the sympathetic whole-bar stretch) is derived
+  // FROM these already-clamped edges — so the pill can never exceed what
+  // the background is actually showing, by construction.
+  const pillEdges = useTransform([fingerX, pillStretch], ([cx, extra]) => {
+    const half = (baseWidth + extra) / 2;
+    const desiredRight = cx + half;
+    const desiredLeft = cx - half;
+    const barMin = originOffset;
+    const barMax = originOffset + contentWidth;
+    const rightCap = Math.max(0, rightSlack - BG_EDGE_BUFFER);
+    const leftCap = Math.max(0, leftSlack - BG_EDGE_BUFFER);
+    const right = Math.min(desiredRight, barMax + rightCap);
+    const left = Math.max(desiredLeft, barMin - leftCap);
+    return [left, right];
+  });
+
+  // Left-anchored transform (x + scaleX from the left edge) instead of the
+  // earlier centre+scale approach — that only supported symmetric growth,
+  // which can't represent "this edge got clamped but that one didn't".
+  // Mathematically identical to the old approach whenever nothing is
+  // clamped, so the normal in-bounds feel is unchanged.
+  const pillX = useTransform(pillEdges, ([l]) => l);
+  const pillScaleX = useTransform(pillEdges, ([l, r]) => (
+    baseWidth ? Math.max(r - l, 6) / baseWidth : 1
+  ));
+
+  // ── Elastic background derivation ──
+  // Envelopes the pill's OWN already-clamped edges (plus a small buffer),
+  // rather than recomputing overflow independently — so the two can never
+  // drift out of sync with each other.
+  const clampedOverflow = useTransform(pillEdges, ([l, r]) => {
+    const barMin = originOffset;
+    const barMax = originOffset + contentWidth;
+    const overRight = Math.max(0, r - barMax);
+    const overLeft = Math.max(0, barMin - l);
     return overRight >= overLeft ? overRight : -overLeft;
   });
 
   // Fixed transform-origin at the left edge for both directions — growing
   // right is a plain scale from x:0; growing left is the same scale plus a
   // compensating negative x so the RIGHT edge stays anchored instead.
-  const bgScaleX = useTransform(bgOverflow, (o) => {
+  const bgScaleX = useTransform(clampedOverflow, (o) => {
     if (!barWidth) return 1;
     const extra = Math.abs(o);
     return extra > 0 ? (barWidth + extra + BG_EDGE_BUFFER) / barWidth : 1;
   });
-  const bgX = useTransform(bgOverflow, (o) => (o < 0 ? o - BG_EDGE_BUFFER : 0));
+  const bgX = useTransform(clampedOverflow, (o) => (o < 0 ? o - BG_EDGE_BUFFER : 0));
+
+  // ── Sympathetic whole-bar stretch ──
+  // A much smaller fraction of the already-clamped overflow, applied to
+  // the bar itself (icons and all) — so the entire thing reads as one
+  // piece of elastic material flexing together, not just the background
+  // capsule moving independently behind static icons. Derived from the
+  // already-clamped value, so it's automatically screen-safe too.
+  const symOverflow = useTransform(clampedOverflow, (o) => {
+    const v = o * SYMPATHETIC_FRACTION;
+    return Math.max(-SYMPATHETIC_MAX_PX, Math.min(v, SYMPATHETIC_MAX_PX));
+  });
+  const symScaleX = useTransform(symOverflow, (o) => {
+    if (!barWidth) return 1;
+    const extra = Math.abs(o);
+    return extra > 0 ? (barWidth + extra) / barWidth : 1;
+  });
+  const symX = useTransform(symOverflow, (o) => (o < 0 ? o : 0));
 
   const moveToCenter = useCallback((index, animated = true) => {
     if (!contentWidth) return;
@@ -212,16 +310,20 @@ export default function Navbar({ config }) {
 
     // Rubber-band resistance once the finger goes past the bar's own
     // content bounds — the pill's centre keeps moving but slower, capped
-    // at MAX_FINGER_OVERSHOOT, instead of tracking the raw finger 1:1. The
-    // elastic background (bgOverflow, above) reacts automatically to this
-    // same fingerX value, so the two always move together.
+    // at whichever is smaller: MAX_FINGER_OVERSHOOT, or the real room left
+    // on that side of the screen (measured in layout, above). The elastic
+    // background and sympathetic whole-bar stretch are both derived from
+    // this same fingerX value, so everything moves together and nothing
+    // can ever push past the actual screen edge.
     const barMin = originOffset;
     const barMax = originOffset + contentWidth;
+    const rightCap = Math.max(0, Math.min(MAX_FINGER_OVERSHOOT, rightSlack - BG_EDGE_BUFFER));
+    const leftCap = Math.max(0, Math.min(MAX_FINGER_OVERSHOOT, leftSlack - BG_EDGE_BUFFER));
     let targetX = fingerLocal;
     if (fingerLocal > barMax) {
-      targetX = barMax + Math.min((fingerLocal - barMax) * OVERSHOOT_RESISTANCE, MAX_FINGER_OVERSHOOT);
+      targetX = barMax + Math.min((fingerLocal - barMax) * OVERSHOOT_RESISTANCE, rightCap);
     } else if (fingerLocal < barMin) {
-      targetX = barMin - Math.min((barMin - fingerLocal) * OVERSHOOT_RESISTANCE, MAX_FINGER_OVERSHOOT);
+      targetX = barMin - Math.min((barMin - fingerLocal) * OVERSHOOT_RESISTANCE, leftCap);
     }
     fingerX.set(targetX);
 
@@ -237,9 +339,10 @@ export default function Navbar({ config }) {
     dragRef.current.dragging = false;
     if (wasDrag) {
       suppressSpyFor();
-      // Spring the centre back onto the settled tab — bgOverflow is
-      // derived from fingerX, so the elastic edge relaxes back to normal
-      // automatically as this settles, no separate "snap back" needed.
+      // Spring the centre back onto the settled tab — clampedOverflow is
+      // derived from fingerX, so the elastic edge and the sympathetic
+      // whole-bar stretch both relax back to normal automatically as this
+      // settles, no separate "snap back" needed.
       moveToCenter(indexOf(activeRef.current), true);
       scroller.scrollTo(activeRef.current, { smooth: true, duration: SCROLL_DURATION, offset: -40 });
     }
@@ -292,9 +395,10 @@ export default function Navbar({ config }) {
         }}
         transition={{ type: 'spring', stiffness: 300, damping: 28 }}
       >
-        <div
+        <motion.div
           className="ios-tabbar-inner"
           ref={tabWrapRef}
+          style={{ x: symX, scaleX: symScaleX }}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
@@ -330,7 +434,7 @@ export default function Navbar({ config }) {
               </div>
             );
           })}
-        </div>
+        </motion.div>
       </motion.nav>
     </>
   );

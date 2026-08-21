@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence, MotionConfig } from 'framer-motion';
 import { FaGithub, FaStar, FaCodeBranch } from 'react-icons/fa';
 import { HiArrowUpRight } from 'react-icons/hi2';
 import BrowserFrame from '../BrowserFrame/BrowserFrame';
+import ProjectDetail from './ProjectDetail';
 import './Projects.css';
 
 function initials(name) {
@@ -16,7 +17,19 @@ function siteUrl(project) {
   return `${(project.title || project.name || 'project').toLowerCase().replace(/[^a-z0-9]+/g, '')}.dev`;
 }
 
-function FeaturedCard({ project, index }) {
+// Same id a project's icon uses in both the featured card and the list
+// row — whichever one is actually on screen shares this with the detail
+// view's hero icon, so Framer Motion can morph between them.
+function iconLayoutId(project) {
+  return `project-icon-${project.title || project.name}`;
+}
+
+function FeaturedCard({ project, index, onOpen }) {
+  const openDetail = () => onOpen(project);
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(); }
+  };
+
   return (
     <motion.div
       className="feat-card"
@@ -25,6 +38,12 @@ function FeaturedCard({ project, index }) {
       whileInView={{ opacity: 1, x: 0 }}
       viewport={{ once: true, margin: '-80px' }}
       transition={{ delay: index * 0.1, duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
+      whileHover={{ y: -4 }}
+      onClick={openDetail}
+      onKeyDown={handleKeyDown}
+      role="button"
+      tabIndex={0}
+      aria-label={`View ${project.title} details`}
     >
       <div className="feat-card-glow" />
       <div className="feat-card-top">
@@ -33,18 +52,26 @@ function FeaturedCard({ project, index }) {
           href={project.demo || project.github}
           target="_blank" rel="noreferrer"
           className="feat-get-btn"
+          onClick={(e) => e.stopPropagation()}
         >
           {project.demo ? 'VISIT' : 'CODE'}
         </a>
       </div>
 
       <div className="feat-card-body">
-        <div className="feat-icon">{initials(project.title)}</div>
+        <motion.div
+          className="feat-icon"
+          layoutId={iconLayoutId(project)}
+          transition={{ type: 'spring', bounce: 0, duration: 0.45 }}
+        >
+          {initials(project.title)}
+        </motion.div>
         <h3 className="feat-title">{project.title}</h3>
         <p className="feat-desc">{project.desc}</p>
         <div className="feat-tags">
           {(project.tags || []).slice(0, 3).map(t => <span key={t} className="feat-tag">{t}</span>)}
         </div>
+        <span className="feat-open-hint">View case study <HiArrowUpRight /></span>
       </div>
 
       <div className="feat-browser-wrap">
@@ -61,19 +88,34 @@ function FeaturedCard({ project, index }) {
   );
 }
 
-function ListRow({ project, index }) {
+function ListRow({ project, index, onOpen }) {
+  const openDetail = () => onOpen(project);
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(); }
+  };
+
   return (
-    <motion.a
-      href={project.github || project.demo}
-      target="_blank" rel="noreferrer"
+    <motion.div
       className="proj-row glass"
       initial={{ opacity: 0, y: 16 }}
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true, margin: '-40px' }}
       transition={{ delay: index * 0.04, duration: 0.4 }}
       whileHover={{ x: 4 }}
+      onClick={openDetail}
+      onKeyDown={handleKeyDown}
+      role="button"
+      tabIndex={0}
+      aria-label={`View ${project.title || project.name} details`}
     >
-      <div className="row-icon" style={{ background: project.color || '#0a84ff' }}>{initials(project.title || project.name)}</div>
+      <motion.div
+        className="row-icon"
+        style={{ background: project.color || '#0a84ff' }}
+        layoutId={iconLayoutId(project)}
+        transition={{ type: 'spring', bounce: 0, duration: 0.45 }}
+      >
+        {initials(project.title || project.name)}
+      </motion.div>
       <div className="row-info">
         <div className="row-title">{project.title || project.name}</div>
         <div className="row-desc">{project.desc || project.description || 'No description.'}</div>
@@ -84,10 +126,15 @@ function ListRow({ project, index }) {
           </div>
         )}
       </div>
-      <span className="row-get">
+      <a
+        href={project.github || project.demo}
+        target="_blank" rel="noreferrer"
+        className="row-get"
+        onClick={(e) => e.stopPropagation()}
+      >
         {project.demo ? 'VISIT' : 'CODE'}
-      </span>
-    </motion.a>
+      </a>
+    </motion.div>
   );
 }
 
@@ -95,6 +142,7 @@ export default function Projects({ config }) {
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const [selectedProject, setSelectedProject] = useState(null);
 
   const githubUsername = config?.githubUsername || 'sandeshpatel1';
   const pinnedProjects = config?.pinnedProjects || [];
@@ -132,53 +180,77 @@ export default function Projects({ config }) {
 
   useEffect(() => { loadProjects(); }, [loadProjects]);
 
+  // Esc closes the open detail view from anywhere on the page.
+  useEffect(() => {
+    if (!selectedProject) return;
+    const onKey = (e) => { if (e.key === 'Escape') setSelectedProject(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedProject]);
+
   const featured = projects.slice(0, 2);
   const rest = projects.slice(2);
 
   return (
-    <section id="projects" className="ios-projects">
-      <div className="container">
-        <div className="proj-header-row">
-          <div>
-            <span className="section-kicker">Showcase</span>
-            <h2 className="section-heading">Websites I've <span className="liquid-text">Shipped</span></h2>
+    <MotionConfig reducedMotion="user">
+      <section id="projects" className="ios-projects">
+        <div className="container">
+          <div className="proj-header-row">
+            <div>
+              <span className="section-kicker">Showcase</span>
+              <h2 className="section-heading">Websites I've <span className="liquid-text">Shipped</span></h2>
+            </div>
+            {fetchGithub && (
+              <button className="ios-btn ios-btn-glass refresh-btn" onClick={loadProjects}>↻ Refresh</button>
+            )}
           </div>
-          {fetchGithub && (
-            <button className="ios-btn ios-btn-glass refresh-btn" onClick={loadProjects}>↻ Refresh</button>
+
+          {loading ? (
+            <div className="proj-skel-row">
+              {[1, 2].map(i => <div key={i} className="proj-skel glass glass-panel" />)}
+            </div>
+          ) : (
+            <>
+              <div className="featured-scroll">
+                {featured.map((p, i) => (
+                  <FeaturedCard key={p.title} project={p} index={i} onOpen={setSelectedProject} />
+                ))}
+              </div>
+
+              {rest.length > 0 && (
+                <div className="proj-list">
+                  <span className="section-kicker" style={{ marginTop: 50, display: 'block' }}>More Projects</span>
+                  <div className="proj-list-rows">
+                    {rest.map((p, i) => (
+                      <ListRow key={p.title} project={p} index={i} onOpen={setSelectedProject} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {error && <p className="proj-error-note">⚠️ Could not reach GitHub — showing saved projects.</p>}
+
+              {fetchGithub && (
+                <p className="gh-note">
+                  Live from <a href={`https://github.com/${githubUsername}`} target="_blank" rel="noreferrer">
+                    GitHub @{githubUsername} <HiArrowUpRight />
+                  </a>
+                </p>
+              )}
+            </>
           )}
         </div>
 
-        {loading ? (
-          <div className="proj-skel-row">
-            {[1, 2].map(i => <div key={i} className="proj-skel glass glass-panel" />)}
-          </div>
-        ) : (
-          <>
-            <div className="featured-scroll">
-              {featured.map((p, i) => <FeaturedCard key={p.title} project={p} index={i} />)}
-            </div>
-
-            {rest.length > 0 && (
-              <div className="proj-list">
-                <span className="section-kicker" style={{ marginTop: 50, display: 'block' }}>More Projects</span>
-                <div className="proj-list-rows">
-                  {rest.map((p, i) => <ListRow key={p.title} project={p} index={i} />)}
-                </div>
-              </div>
-            )}
-
-            {error && <p className="proj-error-note">⚠️ Could not reach GitHub — showing saved projects.</p>}
-
-            {fetchGithub && (
-              <p className="gh-note">
-                Live from <a href={`https://github.com/${githubUsername}`} target="_blank" rel="noreferrer">
-                  GitHub @{githubUsername} <HiArrowUpRight />
-                </a>
-              </p>
-            )}
-          </>
-        )}
-      </div>
-    </section>
+        <AnimatePresence>
+          {selectedProject && (
+            <ProjectDetail
+              project={selectedProject}
+              layoutId={iconLayoutId(selectedProject)}
+              onClose={() => setSelectedProject(null)}
+            />
+          )}
+        </AnimatePresence>
+      </section>
+    </MotionConfig>
   );
 }

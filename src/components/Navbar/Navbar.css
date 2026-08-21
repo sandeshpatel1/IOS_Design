@@ -85,6 +85,8 @@
     width: 100%; max-width: 380px;
     height: 60px;
     padding: 0 3px;
+    transform-origin: left center;
+    will-change: transform;
     /* Custom drag gesture owns horizontal movement here — stop the browser
        from also trying to pan/scroll the page from a touch that starts
        inside the bar. */
@@ -146,6 +148,7 @@
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.2);
       z-index: 0;
       pointer-events: none;
+      transform-origin: left center;
       will-change: transform;
     }
   .ios-tab-icon { font-size: 1.62rem; transition: transform 0.3s var(--ios-spring); }
