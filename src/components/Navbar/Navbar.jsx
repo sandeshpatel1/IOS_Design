@@ -132,9 +132,50 @@ export default function Navbar({ config }) {
   const rawVelocity = useVelocity(fingerX);
   const smoothVelocity = useSpring(rawVelocity, VELOCITY_SPRING);
 
-  const pillStretch = useTransform(smoothVelocity, (v) => (
+  // Fast-flick stretch — decays to 0 the instant motion stops, which is
+  // exactly right for a mid-bar flick, but WRONG for holding at the edge:
+  // once fingerX gets pinned by the resistance clamp below, its velocity
+  // drops to ~0 even while still actively held there, so this alone would
+  // make the pill shrink back to a circle while you're still dragging.
+  const velocityStretch = useTransform(smoothVelocity, (v) => (
     Math.min(Math.abs(v) * STRETCH_VELOCITY_FACTOR, MAX_PILL_STRETCH_PX)
   ));
+
+  // Held-at-edge stretch — purely POSITION-based (how far fingerX is
+  // currently sitting past the bound), so it does NOT decay when velocity
+  // hits zero. Ramps smoothly from 0 up to a generous value as fingerX
+  // approaches its own resistance cap. Deliberately generous on purpose —
+  // pillEdges (below) always clamps the final result to the exact
+  // screen-safe edge anyway, so this only needs to reliably REACH that
+  // edge, not calculate it precisely itself.
+  const overshootPull = useTransform(fingerX, (cx) => {
+    const barMin = originOffset;
+    const barMax = originOffset + contentWidth;
+    const rightCap = Math.max(0, rightSlack - BG_EDGE_BUFFER);
+    const leftCap = Math.max(0, leftSlack - BG_EDGE_BUFFER);
+
+    if (cx > barMax && rightCap > 0) {
+      const held = cx - barMax;
+      const capDistance = Math.min(MAX_FINGER_OVERSHOOT, rightCap) || 1;
+      const t = Math.min(1, held / capDistance);
+      return t * (rightCap * 2 + 24);
+    }
+    if (cx < barMin && leftCap > 0) {
+      const held = barMin - cx;
+      const capDistance = Math.min(MAX_FINGER_OVERSHOOT, leftCap) || 1;
+      const t = Math.min(1, held / capDistance);
+      return t * (leftCap * 2 + 24);
+    }
+    return 0;
+  });
+
+  // Whichever wants more width wins — a fast flick mid-bar still gets its
+  // snappy velocity stretch, while holding at the edge gets (and keeps)
+  // the fill-to-the-border stretch instead of collapsing.
+  const pillStretch = useTransform(
+    [velocityStretch, overshootPull],
+    ([v, pull]) => Math.max(v, pull)
+  );
 
   // ── Pill edges (now the single source of truth) ──
   // Previously the pill rendered from raw fingerX + pillStretch with no
